@@ -1,0 +1,542 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<con:soapui-project id="75b00333-3baa-4a67-bb91-c06b763e22a7" activeEnvironment="Default" name="MKM Brieven Project" resourceRoot="" soapui-version="5.6.0" abortOnError="false" runType="SEQUENTIAL" xmlns:con="http://eviware.com/soapui/config"><con:settings/><con:testSuite id="cae16c60-19dc-4ead-9018-8487c1012d50" name="Brieven TestSuite"><con:settings/><con:runType>SEQUENTIAL</con:runType><con:testCase id="ffe26c35-0366-4508-bd0d-db1e4c60d1a3" failOnError="true" failTestCaseOnErrors="true" keepSession="false" maxResults="0" name="Brieven TestCase" searchProperties="true"><con:settings/><con:testStep type="groovy" name="ScriptLibrary" id="52aa488a-fd90-4d90-a6c3-3b59686a6a50"><con:settings/><con:config><script><![CDATA[//context.setProperty("PDFUtilities", new PDFUtilities())
+import com.testautomationguru.utility.*
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.multipdf.PDFMergerUtility
+import java.awt.*
+import org.apache.commons.lang3.*
+import jxl.*
+import jxl.write.*
+
+class PDFUtilities{
+	//Global objects
+	def log
+	def context
+	def testRunner
+	def pdfUtil = new PDFUtil()
+	
+	def PDFUtilities(log, context, testRunner) {
+		this.log = log
+		this.context = context
+		this.testRunner = testRunner
+	}
+	
+	def printTest(){
+		log.info 'test'
+	}
+
+	def createDirectory(path){
+		def createDirPath = new File(path)
+		if (!createDirPath.exists()){
+			createDirPath.mkdirs()
+		} else {
+			log.warn("Direcory <${path}> already exists")
+		}
+	}
+
+	def stripSpecialCharacters(string){
+		def newString = string.replaceAll("[^a-zA-Z0-9]+","")
+		return newString
+	}
+
+	def logErrorFromStacktrace(event){
+		def str		= event.stackTrace.toString()
+		def pattern 	= ( str =~ /groovy.(\d+)./   )
+		log.error (" EXCEPTION ON LINE ${pattern[0][1]}: ${event}")
+	}
+
+	def clearStepProperties = { args ->
+		log.info("METHOD CALL: clearStepProperties")
+		args.step.getPropertyNames().eachWithIndex{ propName, propIndex ->
+			def propNumber = propIndex+1
+			switch(args.type){
+				case "startsWith":
+					if (propName.startsWith(args.value.toString())){
+						args.step.removeProperty(propName)
+					}	
+				break
+				case "clear":
+					args.step.removeProperty(propName)
+				break
+				case "contains":
+					if (propName.contains(args.value.toString())){
+						args.step.removeProperty(propName)
+					}
+				break
+				case "index":
+					if (propNumber > args.value){
+						args.step.removeProperty(propName)
+					}
+				break
+			}
+		}
+	}
+
+	def buildPDFDataIndex (fileString, propertyStepName){
+		log.info("METHOD CALL: buildPDFDataIndex")
+		def propStep		= context.testCase.getTestStepByName(propertyStepName)
+		def resultIndex		= 1
+		def pageCount 	= pdfUtil.getPageCount(fileString)
+		log.info ("PageCount: $pageCount")
+	
+		(1..pageCount).each{ pageNumber ->
+			def pageText 	= pdfUtil.getText(fileString, pageNumber, pageNumber)
+			log.info ("PageText: $pageText")
+		
+			if (pageText.contains("Betreft")) {
+				
+				def kenmerkPattern = /(?<=Kenmerk ).*?(?=Geachte)/
+				def  kenmerkMatcher = pageText =~ kenmerkPattern
+				def firstSplit  = kenmerkMatcher[0].split(" Uw Kenmerk ")
+				def secondSplit  = firstSplit[1].split(" Betreft: ")
+				log.info ("Kenmerk: ${firstSplit[0]} Uw Kenmerk: ${secondSplit[0]} Type: ${secondSplit[1]}  Pagina: $pageNumber")
+	
+				if (resultIndex > 1){
+				 	//ADD END PAGE TO PREVIOUS PROPERTY, BASED ON THIS PROPERTY'S PAGE
+				 	def previousPropIndex 	= resultIndex-1
+				 	def previousProp 			= propStep.getPropertyValue(previousPropIndex.toString())
+				 	def previousEndPage		= pageNumber-1
+				 	propStep.setPropertyValue(previousPropIndex.toString(), previousProp+";${previousEndPage.toString().trim()}")
+				 }
+				 propStep.setPropertyValue(resultIndex.toString(), "${secondSplit[0].trim()};${secondSplit[1].trim()}; ${firstSplit[0].trim()};${pageNumber.toString().trim()}")
+				 resultIndex++
+			}
+	
+			if (pageNumber == pageCount){
+				//ADD END PAGE TO LAST PROPERTY
+				def previousPropIndex 	= resultIndex-1
+				def previousProp 			= propStep.getPropertyValue(previousPropIndex.toString())
+				propStep.setPropertyValue(previousPropIndex.toString(), "${previousProp};${pageNumber}")
+			 }
+		}
+	}
+	
+	def splitPDF(fileString, propertyStepName, outputDir, pdfName){
+		log.info("METHOD CALL: splitPDF")
+		def document 		= PDDocument.load(new File(fileString))
+		def pages 			= document.getDocumentCatalog().getPages()
+		def table				= context.testCase.getTestStepByName(propertyStepName)
+		table.properties.each{ prop ->
+			try{
+				log.info("Splitting prop line with key <${prop.key}>")
+				def key 			= prop.key
+				def value		= prop.value.value
+				def splitValue	= value.split(";")
+				def kenteken	= splitValue[0]
+				def sanitizedKenteken = this.stripSpecialCharacters(kenteken)
+				def type			= splitValue[1]
+				def kenmerk	= splitValue[2]
+				def sanitizedKenmerk = this.stripSpecialCharacters(kenmerk)
+				def startPage	= splitValue[3]
+				def endPage	= splitValue[4]
+				log.info ("key: ${key} || value: ${value} || start: ${startPage} || end: ${endPage}")
+				this.createDirectory("${outputDir}\\${sanitizedKenteken}_${sanitizedKenmerk} (${type})")
+			
+				def newDocument = new PDDocument()
+				(startPage.toInteger()-1..endPage.toInteger()-1).each{ pageIndex ->
+					def page = pages.get(pageIndex)
+					newDocument.addPage(page)
+				}
+			
+				newDocument.save("${outputDir}\\${sanitizedKenteken}_${sanitizedKenmerk} (${type})\\${pdfName}.pdf")
+				newDocument.close()
+			} catch (e){
+				this.logErrorFromStacktrace(e)
+			}
+		}
+	}
+
+	def combinePDF(runDir, outputDir){
+		log.info("METHOD CALL: combinePDF")
+		try{
+			def runDirectory 		= new File (runDir)
+			this.createDirectory("${outputDir}")
+			
+			def pdfMerger = new PDFMergerUtility()
+			
+			pdfMerger.setDestinationFileName("${outputDir}\\combined_file.pdf");
+			
+			runDirectory.eachDir{ subDirectory ->
+				log.info ("Currently processing directory: ${subDirectory.toString()}")
+				subDirectory.eachFile{ file ->
+					def pdf = new File(file.absolutePath)
+					pdfMerger.addSource(pdf)
+				}
+			}
+
+			pdfMerger.mergeDocuments(null)
+			
+		} catch (e){
+			this.logErrorFromStacktrace(e)
+		}
+	}
+
+	def buildExcelRow(sheet, row, dataList){
+		def colNum = 0
+		dataList.each{ cellData ->
+			try{
+				sheet.addCell(new jxl.write.Label(colNum, row, cellData.toString()))
+				colNum++
+			} catch (e){
+				log.error e
+//				this.logErrorToStacktrace(e)
+			}
+		}
+	}
+
+	def comparePDFDirectories(runDir){
+		log.info("METHOD CALL: comparePDFDirectories")
+		try{
+			def runDirectory 		= new File (runDir)
+			def reportTime	= new Date().format("yyyyMMdd_hh.mm.ss")
+			def workbook 	= Workbook.createWorkbook(new File("${runDir}\\${reportTime}_Compare_Results.xls"))
+			def sheet 		= workbook.createSheet("RunReport", 0)
+			def currentRow = 0
+			def rowData = ["Directory", "Control File Exists", "Run File Exists", "Text Compare Result", "Levenshtein Distance", "Image Compare Result", "Page 1 Diff %", "Page 2 Diff %", "Page 3 Diff %", "Page 4 Diff %", "Page 5 Diff %"]
+			this.buildExcelRow(sheet, currentRow, rowData)
+			currentRow++
+			
+			pdfUtil.highlightPdfDifference(true)
+			pdfUtil.setBlockColor(Color.GRAY)
+			pdfUtil.setHighlightColor(Color.MAGENTA)
+			pdfUtil.setDpi(300)
+			pdfUtil.compareAllPages(true)
+			
+			runDirectory.eachDir{ subDirectory ->
+				log.info ("Currently processing directory: ${subDirectory.toString()}")
+				def controlFilePath = "${subDirectory.toString()}\\controle_run.pdf"
+				def runFilePath = "${subDirectory.toString()}\\nieuwe_run.pdf"
+				def controlFile = new File(controlFilePath)
+				def runFile = new File(runFilePath)
+				if (controlFile.exists() && runFile.exists()){
+					pdfUtil.setCompareMode(CompareMode.TEXT_MODE)
+					def stringOne = pdfUtil.getText(controlFilePath)
+					def stringTwo = pdfUtil.getText(runFilePath)
+					def stringResult = StringUtils.getLevenshteinDistance(stringOne, stringTwo)
+					def booleanStringResult = (stringResult == 0) ? 'TRUE' : 'FALSE'
+					log.info("Text Compare Levenshtein Distance: ${stringResult}")
+					
+					pdfUtil.setCompareMode(CompareMode.VISUAL_MODE)
+					pdfUtil.setImageDestinationPath(subDirectory.toString())
+					def resultList = pdfUtil.compareForPercentageWithBlockedContent(controlFilePath, runFilePath, 1, -1)
+					def booleanResultList = resultList.any{it > 0}.toString().toUpperCase()
+					log.info("Visual Compare result: ${resultList}")
+					rowData = ["${subDirectory.name.toString()}", "TRUE", "TRUE", "${booleanStringResult}", "${stringResult}", "${booleanResultList}"]
+					rowData = rowData + resultList
+					this.buildExcelRow(sheet, currentRow, rowData)
+					currentRow++
+				} else {
+					if (controlFile.exists()){
+						rowData = ["${subDirectory.name.toString()}", "TRUE", "FALSE"]
+						this.buildExcelRow(sheet, currentRow, rowData)
+						currentRow++
+					} else {
+						rowData = ["${subDirectory.name.toString()}", "FALSE", "TRUE"]
+						this.buildExcelRow(sheet, currentRow, rowData)
+						currentRow++
+					}
+					def dirToDelete = subDirectory
+					dirToDelete.deleteDir()
+				}
+			}
+		} catch(e){
+			this.logErrorFromStacktrace(e)
+		} finally {
+			workbook.write()
+    			workbook.close()
+		}
+	}
+
+	def copyPDFDirectories(runDir, outputDir){
+		try{
+			def runDirectory = new File (runDir)
+			def controlFile = null
+			runDirectory.eachDir{ subDirectory ->
+				def fileCount = subDirectory.listFiles().size()
+				if (fileCount == 1){
+					subDirectory.eachFile{ file ->
+						controlFile = file
+					}
+				} else {
+					def controlFilePath = "${subDirectory.toString()}\\controle_run.pdf"
+					controlFile = new File(controlFilePath)
+				}
+				this.createDirectory("${outputDir}\\${subDirectory.name}")
+				def dst = new File("${outputDir}\\${subDirectory.name}", "controle_run.pdf")
+				 controlFile?.withInputStream{ stream-> 
+				 	dst << stream
+				 }
+			}
+		} catch (e){
+			this.logErrorFromStacktrace(e)
+		}
+	}
+
+	def openDirectory(path){
+		Desktop.getDesktop().open(new File(path))
+	}
+
+	
+
+
+
+	
+}
+
+/* Initialisation block */
+PDFUtilities initObj = context.getProperty("PDFUtilities")
+if (initObj == null) {
+    initObj = new PDFUtilities(log, context, context.getTestRunner())
+    context.setProperty(initObj.getClass().getName(), initObj)
+}
+]]></script></con:config></con:testStep><con:testStep type="groovy" name="Script Demos" id="4c900baf-3657-4716-a428-684604aeb6ce" disabled="true"><con:settings/><con:config><script>
+//	TEST CALLING THE SCRIPT LIBRARY
+//context.PDFUtilities.printTest()
+
+//	TEST CLEARING THE CONTROL DATA PROPERTIES
+//context.PDFUtilities.clearStepProperties(step:context.testCase.getTestStepByName("Controle Data"), type:"clear")
+
+//	TEST BUILDING THE DATA INDEX FOR A PDF
+//context.PDFUtilities.buildPDFDataIndex("C:\\SOAP\\Output\\20211206 - Output.MRB001.N0079616.PDF", "Controle Data")
+
+
+//	TEST SPLITTING DOCUMENT
+//context.PDFUtilities.splitPDF("C:\\SOAP\\Output\\20211206 - Output.MRB001.N0079616.PDF", "Controle Data", "C:\\temp\\Output\\test", "controle_run")
+
+//	TEST COMBINE PDF
+//context.PDFUtilities.combinePDF("C:\\temp\\Output\\test",  "C:\\temp\\Output\\testtest")
+
+//	TEST COMPARE PDF
+context.PDFUtilities.comparePDFDirectories("C:\\TestAutomation\\Output\\testtest13")
+
+//	TEST COPY PDF DIRECTORIES
+//context.PDFUtilities.copyPDFDirectories("C:\\TestAutomation\\Output\\testtest13", "C:\\TestAutomation\\Output\\copy2")
+
+//dir = new File("C:\\TestAutomation\\Output\\testtest13")
+//log.info dir.name
+
+//import jxl.*
+//import jxl.write.*
+//
+//
+//def buildExcelRow(sheet, row, dataList){
+//	colNum = 0
+//	dataList.each{ cellData ->
+//		sheet.addCell(new Label(colNum, row, cellData.toString()))
+//		colNum++
+//	}
+//}
+//
+//workbook 	= Workbook.createWorkbook(new File("C:/temp/TestResult4.xls"))
+//sheet 		= workbook.createSheet("RunReport", 0)
+//currentRow = 0
+//compareResult = [0.891246, 0.0, 0.98364]
+//endList = ["Directory", "Levenshtein Distance", "Text Compare Result"]+compareResult
+//buildExcelRow(sheet, currentRow, endList)
+//
+//workbook.write()
+//workbook.close()
+
+//myList = [0.0, 0.0]
+//
+//log.info myList.any{ it > 0}</script></con:config></con:testStep><con:testStep type="groovy" name="UI" id="9a6d6342-c3d5-4222-bfa4-b8a461f392d3"><con:settings/><con:config><script><![CDATA[import groovy.swing.*
+import java.awt.*
+import javax.swing.*
+import javax.swing.filechooser.*
+import javax.swing.border.*
+import net.miginfocom.layout.Grid
+import net.miginfocom.swing.MigLayout
+
+suite 						= context.testCase.testSuite
+centerAlign 				= new DefaultListCellRenderer();centerAlign.setHorizontalAlignment(DefaultListCellRenderer.CENTER)
+swing			 			= new SwingBuilder()
+currentControlFile 	= suite.getPropertyValue('controlFile') ?: 'C://'
+currentControlDir 		= suite.getPropertyValue('controlDir') ?: 'C://'
+currentRunFile 		= suite.getPropertyValue('runFile') ?: 'C://'
+currentOutputDir 		= suite.getPropertyValue('outputDir') ?: 'C://'
+
+UIManager.getDefaults().put("TabbedPane.contentBorderInsets", new Insets(0,0,0,0));
+//UIManager.getDefaults().put("TabbedPane.tabAreaInsets", new Insets(0,0,0,0));
+//UIManager.getDefaults().put("TabbedPane.tabsOverlapBorder", true);
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//	GENERIC METHOD TO SET ALL TABBED PANE TAB COLORS TO WHITE.
+//	AVOIDS THE SUPER UGLY DARK GREY BASE COLOR USED IN JPANELS/JTABBEDPANES
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def setTabbedPaneTabsToWhite = { tabbedPane ->
+	(0..tabbedPane.tabCount-1).each{ index ->
+		tabbedPane.setBackgroundAt(index, Color.WHITE)
+	}
+}
+
+def openFileChooser(title, callType, defaultDir, selectionMode, filter){
+	log.info defaultDir
+	fc = swing.fileChooser(dialogTitle:title, fileSelectionMode:selectionMode, fileFilter:filter, currentDirectory: new File(defaultDir))
+	if (fc.showOpenDialog() == JFileChooser.APPROVE_OPTION){
+		try{
+			log.info fc.selectedFile
+			log.info fc.selectedFile.absolutePath
+			
+			switch(callType){
+				case "controlDir":
+					swing.txtControlDir.text = fc.selectedFile
+				break
+				case "controlFile":
+					swing.txtControlFile.text = fc.selectedFile
+				break
+				case "runDir":
+					swing.txtRunDir.text = fc.selectedFile
+				break
+				case "runFile":
+					swing.txtRunFile.text = fc.selectedFile
+				break
+				case "outputDir":
+					swing.txtOutputDir.text = fc.selectedFile
+				break
+			}
+		} catch (e){
+			log.error e
+		}
+		suite.setPropertyValue("$callType", fc.selectedFile.toString())
+	}
+}
+
+def buildComponents(callType){
+	switch(callType){
+			case "controlDir":
+				swing.label(id:'lbControlDir', 'Control Directory')
+				swing.textField(id:'txtControlDir', text:currentControlDir, columns:40, constraints:"gapleft 10")
+				swing.button(id:'btnControlDirSelect', constraints:"wrap", icon: UIManager.getIcon("FileView.directoryIcon"), actionPerformed: {
+					openFileChooser('Selecteer hoofdmap met controlebestanden', 'controlDir', swing.txtControlDir.text, JFileChooser.DIRECTORIES_ONLY, null)
+				})
+			break
+			case "controlFile":
+				swing.label(id:'lbControlFile', 'Control PDF')
+				swing.textField(id:'txtControlFile', text:currentControlFile, columns:40, constraints:"gapleft 10")
+				swing.button(id:'btnControlFileSelect', constraints:"wrap", icon: UIManager.getIcon("FileView.directoryIcon"), actionPerformed: {
+					openFileChooser('Selecteer PDF van de controle run', 'controlFile', swing.txtControlFile.text, JFileChooser.FILES_ONLY,  new FileNameExtensionFilter("*.pdf", "pdf"))
+				})
+			break
+			case "runDir":
+				swing.label(id:'lbRunDir', 'Run Directory')
+				swing.textField(id:'txtRunDir', text:currentRunDir, columns:40, constraints:"gapleft 10")
+				swing.button(id:'btnRunDirSelect', constraints:"wrap", icon: UIManager.getIcon("FileView.directoryIcon"), actionPerformed: {
+					openFileChooser('Selecteer hoofdmap met bestanden van de laatste run', 'runDir', swing.txtRunDir.text, JFileChooser.FILES_ONLY, null)
+				})
+			break
+			case "runFile":
+				swing.label(id:'lbRunFile', 'Run PDF')
+				swing.textField(id:'txtRunFile', text:currentRunFile, columns:40, constraints:"gapleft 10")
+				swing.button(id:'btnRunFileSelect', constraints:"wrap", icon: UIManager.getIcon("FileView.directoryIcon"), actionPerformed: {
+					openFileChooser('Selecteer PDF van de te controleren run', 'runFile', swing.txtRunFile.text, JFileChooser.FILES_ONLY,  new FileNameExtensionFilter("*.pdf", "pdf"))
+				})
+			break
+			case "outputDir":
+				swing.label(id:'lbOutputDir', 'Output Directory')
+				swing.textField(id:'txtOutputDir', text:currentOutputDir, columns:40, constraints:"gapleft 10")
+				swing.button(id:'btnOutputDirSelect', constraints:"wrap", icon: UIManager.getIcon("FileView.directoryIcon"), actionPerformed: {
+					openFileChooser('Selecteer map voor verwerkte bestanden', 'outputDir', swing.txtOutputDir.text, JFileChooser.DIRECTORIES_ONLY, null)
+				})
+			break
+		}
+}
+
+def toggleEnabledComponents(){
+	searchList = []
+	changedList = []
+	switch(swing.cmbProcessType.selectedIndex){
+		case 0:
+			searchList = ['ControlDir', 'RunFile', 'Output']
+		break
+		case 1:
+			searchList = ['ControlFile', 'RunFile', 'Output']
+		break
+		case 2:
+			searchList = ['ControlDir', 'Output']
+		break
+		case 3:
+			searchList = ['ControlFile', 'Output']
+		break
+	}
+	swing.mainPanel.components.each{ component ->
+		searchList.each{ searchTerm ->
+			if (component.name && component.name?.contains(searchTerm)){
+				changedList << component.name
+				component.enabled = true
+//			} else if (component.name == "cmbProcessType"){
+			} else if (component.name?.contains("Process")){
+				//
+			} else if (component.name in changedList){
+				//
+			} else {
+				changedList << component.name
+				component.enabled = false
+			}
+		}
+	}
+}
+
+startDialog = swing.dialog(title:'MKM Brieven Suite', modal: true) {
+	panel(id:'mainPanel', name:"Compare FIle <> File", layout: new MigLayout()){
+		label(id:'lbProcessType', 'Processing Type')
+		comboBox(id:'cmbProcessType', items:['Compare Control Directory <> Run File', 'Compare Control File <> Run File', 'Convert Directory > File', 'Convert File > Directory'], renderer: centerAlign, constraints:'gapleft 10, wrap, span, grow', actionPerformed:{
+			toggleEnabledComponents()
+		})
+		buildComponents('controlFile')
+		buildComponents('runFile')
+		buildComponents('controlDir')
+		buildComponents('outputDir')
+	}
+	panel(constraints:BorderLayout.SOUTH, border: emptyBorder(10,10,10,10), layout: new MigLayout("insets 0 5 5 5")){
+		progressBar(id:'pb', stringPainted:true, string:'', preferredSize:new Dimension(425, 25))
+		
+		button(defaultButton:true, text:'Process', actionPerformed: {
+//			startDialog.dispose()
+			swing.pb.indeterminate = true
+			swing.doOutside{
+				switch(swing.cmbProcessType.selectedIndex){
+					case 0:
+						context.PDFUtilities.clearStepProperties(step:context.testCase.getTestStepByName("Nieuwe Data"), type:"clear")
+						context.PDFUtilities.buildPDFDataIndex(swing.txtRunFile.text, "Nieuwe Data")
+						context.PDFUtilities.splitPDF(swing.txtRunFile.text, "Nieuwe Data", swing.txtOutputDir.text, "nieuwe_run")
+						context.PDFUtilities.copyPDFDirectories(swing.txtControlDir.text, swing.txtOutputDir.text)
+						context.PDFUtilities.comparePDFDirectories(swing.txtOutputDir.text)
+					break
+					case 1:
+						context.PDFUtilities.clearStepProperties(step:context.testCase.getTestStepByName("Controle Data"), type:"clear")
+						context.PDFUtilities.clearStepProperties(step:context.testCase.getTestStepByName("Nieuwe Data"), type:"clear")
+						context.PDFUtilities.buildPDFDataIndex(swing.txtControlFile.text, "Controle Data")
+						context.PDFUtilities.buildPDFDataIndex(swing.txtRunFile.text, "Nieuwe Data")
+						context.PDFUtilities.splitPDF(swing.txtControlFile.text, "Controle Data", swing.txtOutputDir.text, "controle_run")
+						context.PDFUtilities.splitPDF(swing.txtRunFile.text, "Nieuwe Data", swing.txtOutputDir.text, "nieuwe_run")
+						context.PDFUtilities.comparePDFDirectories(swing.txtOutputDir.text)
+					break
+					case 2:
+						context.PDFUtilities.combinePDF(swing.txtControlDir.text, swing.txtOutputDir.text)
+					break
+					case 3:
+						context.PDFUtilities.clearStepProperties(step:context.testCase.getTestStepByName("Controle Data"), type:"clear")
+						context.PDFUtilities.buildPDFDataIndex(swing.txtControlFile.text, "Controle Data")
+						context.PDFUtilities.splitPDF(swing.txtControlFile.text, "Controle Data", swing.txtOutputDir.text, "controle_run")
+					break
+				}
+				swing.pb.indeterminate = false
+				context.PDFUtilities.openDirectory(swing.txtOutputDir.text)
+			}
+		})
+		button(text:'Close', constraints:'', actionPerformed:{
+			testRunner.cancel("CANCEL BUTTON PRESSED")
+			startDialog.dispose()
+		})
+	}
+}
+
+toggleEnabledComponents()
+startDialog.pack()
+startDialog.setLocationRelativeTo(null)
+startDialog.show()
+
+
+
+return]]></script></con:config></con:testStep><con:testStep type="properties" name="Controle Data" id="38c1a5ab-914c-4b18-9912-dbdca2877d2c" disabled="true"><con:settings/><con:config xsi:type="con:PropertiesStep" saveFirst="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><con:properties><con:property><con:name>1</con:name><con:value>VS­002­B;Verschuldigdheid motorrijtuigenbelasting; 780000250 M 20 09000;1;4</con:value></con:property><con:property><con:name>2</con:name><con:value>VS­002­D;Verschuldigdheid motorrijtuigenbelasting; 780000262 M 20 09000;5;8</con:value></con:property><con:property><con:name>3</con:name><con:value>VS­002­C;Verschuldigdheid motorrijtuigenbelasting; 780000213 M 20 09000;9;12</con:value></con:property><con:property><con:name>4</con:name><con:value>VS­002­A;Verschuldigdheid motorrijtuigenbelasting; 780000195 M 20 09000;13;16</con:value></con:property><con:property><con:name>5</con:name><con:value>VS­022­E;Nihiltarief motorrijtuigenbelasting; 780000870 M 20 09000;17;18</con:value></con:property><con:property><con:name>6</con:name><con:value>VS­022­D;Nihiltarief motorrijtuigenbelasting; 780000869 M 20 09000;19;20</con:value></con:property><con:property><con:name>7</con:name><con:value>VS­002­E;Verschuldigdheid motorrijtuigenbelasting; 780000237 M 20 09000;21;24</con:value></con:property><con:property><con:name>8</con:name><con:value>VS­022­B;Nihiltarief motorrijtuigenbelasting; 780000146 M 20 09000;25;26</con:value></con:property><con:property><con:name>9</con:name><con:value>VS­022­A;Nihiltarief motorrijtuigenbelasting; 780000821 M 20 09000;27;28</con:value></con:property><con:property><con:name>10</con:name><con:value>VS­002­F;Verschuldigdheid motorrijtuigenbelasting; 780000808 M 20 09000;29;32</con:value></con:property><con:property><con:name>11</con:name><con:value>VS­002­Z;Verschuldigdheid motorrijtuigenbelasting; 780000432 M 20 09000;33;36</con:value></con:property><con:property><con:name>12</con:name><con:value>VS­002­Q;Verschuldigdheid motorrijtuigenbelasting; 780000808 M 20 09000;37;40</con:value></con:property><con:property><con:name>13</con:name><con:value>VS­002­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780000262 M 20 09000;41;42</con:value></con:property><con:property><con:name>14</con:name><con:value>VS­002­D;Verschuldigdheid motorrijtuigenbelasting; 780000225 M 20 09000;43;46</con:value></con:property><con:property><con:name>15</con:name><con:value>VS­012­D;Verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;47;50</con:value></con:property><con:property><con:name>16</con:name><con:value>VS­012­C;Verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;51;54</con:value></con:property><con:property><con:name>17</con:name><con:value>VS­012­E;Verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;55;58</con:value></con:property><con:property><con:name>18</con:name><con:value>VS­010­G;Verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;59;62</con:value></con:property><con:property><con:name>19</con:name><con:value>VS­012­F;Verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;63;66</con:value></con:property><con:property><con:name>20</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;67;70</con:value></con:property><con:property><con:name>21</con:name><con:value>VS­010­E;Verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;71;74</con:value></con:property><con:property><con:name>22</con:name><con:value>VS­010­D;Verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;75;78</con:value></con:property><con:property><con:name>23</con:name><con:value>VS­010­F;Verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;79;82</con:value></con:property><con:property><con:name>24</con:name><con:value>VS­010­H;Verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;83;86</con:value></con:property><con:property><con:name>25</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;87;90</con:value></con:property><con:property><con:name>26</con:name><con:value>VS­010­A;Verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;91;94</con:value></con:property><con:property><con:name>27</con:name><con:value>VS­010­I;Verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;95;98</con:value></con:property><con:property><con:name>28</con:name><con:value>VS­022­E;Nihiltarief motorrijtuigenbelasting; 780000158 M 20 09000;99;100</con:value></con:property><con:property><con:name>29</con:name><con:value>VS­022­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780000870 M 20 09000;101;102</con:value></con:property><con:property><con:name>30</con:name><con:value>VS­012­B;Verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;103;106</con:value></con:property><con:property><con:name>31</con:name><con:value>VS­012­A;Verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;107;110</con:value></con:property><con:property><con:name>32</con:name><con:value>VS­010­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;111;112</con:value></con:property><con:property><con:name>33</con:name><con:value>VS­010­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;113;114</con:value></con:property><con:property><con:name>34</con:name><con:value>VS­012­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;115;116</con:value></con:property><con:property><con:name>35</con:name><con:value>VS­010­G;Verandering verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;117;118</con:value></con:property><con:property><con:name>36</con:name><con:value>VS­012­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;119;120</con:value></con:property><con:property><con:name>37</con:name><con:value>VS­010­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;121;122</con:value></con:property><con:property><con:name>38</con:name><con:value>VS­012­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;123;124</con:value></con:property><con:property><con:name>39</con:name><con:value>VS­012­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;125;126</con:value></con:property><con:property><con:name>40</con:name><con:value>VS­012­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;127;128</con:value></con:property><con:property><con:name>41</con:name><con:value>VS­010­I;Verandering verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;129;130</con:value></con:property><con:property><con:name>42</con:name><con:value>VS­010­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;131;132</con:value></con:property><con:property><con:name>43</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000936 M 20 09000;133;136</con:value></con:property><con:property><con:name>44</con:name><con:value>VS­012­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;137;138</con:value></con:property><con:property><con:name>45</con:name><con:value>VS­012­E;Verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;139;142</con:value></con:property><con:property><con:name>46</con:name><con:value>VS­012­F;Verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;143;146</con:value></con:property><con:property><con:name>47</con:name><con:value>VS­010­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;147;148</con:value></con:property><con:property><con:name>48</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000183 M 20 09000;149;152</con:value></con:property><con:property><con:name>49</con:name><con:value>VS­010­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;153;154</con:value></con:property><con:property><con:name>50</con:name><con:value>VS­010­H;Verandering verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;155;156</con:value></con:property><con:property><con:name>51</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;157;160</con:value></con:property><con:property><con:name>52</con:name><con:value>VS­010­A;Verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;161;164</con:value></con:property><con:property><con:name>53</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;165;168</con:value></con:property><con:property><con:name>54</con:name><con:value>VS­010­E;Verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;169;172</con:value></con:property><con:property><con:name>55</con:name><con:value>VS­010­D;Verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;173;176</con:value></con:property><con:property><con:name>56</con:name><con:value>VS­010­G;Verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;177;180</con:value></con:property><con:property><con:name>57</con:name><con:value>VS­010­F;Verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;181;184</con:value></con:property><con:property><con:name>58</con:name><con:value>VS­010­I;Verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;185;188</con:value></con:property><con:property><con:name>59</con:name><con:value>VS­010­H;Verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;189;192</con:value></con:property><con:property><con:name>60</con:name><con:value>VS­012­B;Verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;193;196</con:value></con:property><con:property><con:name>61</con:name><con:value>VS­012­A;Verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;197;200</con:value></con:property><con:property><con:name>62</con:name><con:value>VS­012­D;Verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;201;204</con:value></con:property><con:property><con:name>63</con:name><con:value>VS­012­C;Verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;205;208</con:value></con:property><con:property><con:name>64</con:name><con:value>VS­010­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;209;210</con:value></con:property><con:property><con:name>65</con:name><con:value>VS­010­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;211;212</con:value></con:property><con:property><con:name>66</con:name><con:value>VS­012­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;213;214</con:value></con:property><con:property><con:name>67</con:name><con:value>VS­010­G;Verandering verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;215;216</con:value></con:property><con:property><con:name>68</con:name><con:value>VS­012­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;217;218</con:value></con:property><con:property><con:name>69</con:name><con:value>VS­010­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;219;220</con:value></con:property><con:property><con:name>70</con:name><con:value>VS­012­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;221;222</con:value></con:property><con:property><con:name>71</con:name><con:value>VS­012­B;Verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09001;223;226</con:value></con:property><con:property><con:name>72</con:name><con:value>VS­012­B;Verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09001;227;230</con:value></con:property><con:property><con:name>73</con:name><con:value>VS­012­E;Verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;231;234</con:value></con:property><con:property><con:name>74</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09001;235;238</con:value></con:property><con:property><con:name>75</con:name><con:value>VS­010­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780000936 M 20 09000;239;240</con:value></con:property><con:property><con:name>76</con:name><con:value>VS­010­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780000936 M 20 09000;241;242</con:value></con:property><con:property><con:name>77</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09001;243;246</con:value></con:property><con:property><con:name>78</con:name><con:value>VS­012­F;Verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;247;250</con:value></con:property><con:property><con:name>79</con:name><con:value>VS­012­A;Verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;251;254</con:value></con:property><con:property><con:name>80</con:name><con:value>VS­012­A;Verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;255;258</con:value></con:property><con:property><con:name>81</con:name><con:value>VS­012­E;Verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;259;262</con:value></con:property><con:property><con:name>82</con:name><con:value>VS­012­C;Verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09001;263;266</con:value></con:property><con:property><con:name>83</con:name><con:value>VS­012­F;Verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;267;270</con:value></con:property><con:property><con:name>84</con:name><con:value>VS­012­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;271;272</con:value></con:property><con:property><con:name>85</con:name><con:value>VS­012­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;273;274</con:value></con:property><con:property><con:name>86</con:name><con:value>VS­010­I;Verandering verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;275;276</con:value></con:property><con:property><con:name>87</con:name><con:value>VS­012­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;277;278</con:value></con:property><con:property><con:name>88</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000936 M 20 09000;279;282</con:value></con:property><con:property><con:name>89</con:name><con:value>VS­010­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;283;284</con:value></con:property><con:property><con:name>90</con:name><con:value>VS­010­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;285;286</con:value></con:property><con:property><con:name>91</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000183 M 20 09000;287;290</con:value></con:property><con:property><con:name>92</con:name><con:value>VS­010­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;291;292</con:value></con:property><con:property><con:name>93</con:name><con:value>VS­010­H;Verandering verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;293;294</con:value></con:property><con:property><con:name>94</con:name><con:value>VS­012­C;Verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09001;295;298</con:value></con:property><con:property><con:name>95</con:name><con:value>VS­012­D;Verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09001;299;302</con:value></con:property></con:properties></con:config></con:testStep><con:testStep type="properties" name="Nieuwe Data" id="b1473a37-d32c-499a-b0d9-b0faf4f05556" disabled="true"><con:settings/><con:config xsi:type="con:PropertiesStep" saveFirst="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><con:properties><con:property><con:name>1</con:name><con:value>VS­010­E;Verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;1;4</con:value></con:property><con:property><con:name>2</con:name><con:value>VS­010­A;Verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;5;8</con:value></con:property><con:property><con:name>3</con:name><con:value>VS­010­D;Verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;9;12</con:value></con:property><con:property><con:name>4</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;13;16</con:value></con:property><con:property><con:name>5</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;17;20</con:value></con:property><con:property><con:name>6</con:name><con:value>VS­010­F;Verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;21;24</con:value></con:property><con:property><con:name>7</con:name><con:value>VS­010­G;Verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;25;28</con:value></con:property><con:property><con:name>8</con:name><con:value>VS­010­H;Verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;29;32</con:value></con:property><con:property><con:name>9</con:name><con:value>VS­012­A;Verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;33;36</con:value></con:property><con:property><con:name>10</con:name><con:value>VS­010­I;Verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;37;40</con:value></con:property><con:property><con:name>11</con:name><con:value>VS­012­B;Verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;41;44</con:value></con:property><con:property><con:name>12</con:name><con:value>VS­012­C;Verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;45;48</con:value></con:property><con:property><con:name>13</con:name><con:value>VS­012­E;Verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;49;52</con:value></con:property><con:property><con:name>14</con:name><con:value>VS­012­D;Verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;53;56</con:value></con:property><con:property><con:name>15</con:name><con:value>VS­012­F;Verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;57;60</con:value></con:property><con:property><con:name>16</con:name><con:value>VS­010­C;Verschuldigdheid motorrijtuigenbelasting; 780000183 M 20 09000;61;64</con:value></con:property><con:property><con:name>17</con:name><con:value>VS­010­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780000948 M 20 09000;65;66</con:value></con:property><con:property><con:name>18</con:name><con:value>VS­010­H;Verandering verschuldigdheid motorrijtuigenbelasting; 780001047 M 20 09000;67;68</con:value></con:property><con:property><con:name>19</con:name><con:value>VS­010­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780000912 M 20 09000;69;70</con:value></con:property><con:property><con:name>20</con:name><con:value>VS­012­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001114 M 20 09000;71;72</con:value></con:property><con:property><con:name>21</con:name><con:value>VS­010­F;Verandering verschuldigdheid motorrijtuigenbelasting; 780001023 M 20 09000;73;74</con:value></con:property><con:property><con:name>22</con:name><con:value>VS­012­A;Verandering verschuldigdheid motorrijtuigenbelasting; 780001060 M 20 09000;75;76</con:value></con:property><con:property><con:name>23</con:name><con:value>VS­010­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780000997 M 20 09000;77;78</con:value></con:property><con:property><con:name>24</con:name><con:value>VS­010­G;Verandering verschuldigdheid motorrijtuigenbelasting; 780001035 M 20 09000;79;80</con:value></con:property><con:property><con:name>25</con:name><con:value>VS­010­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780000973 M 20 09000;81;82</con:value></con:property><con:property><con:name>26</con:name><con:value>VS­012­C;Verandering verschuldigdheid motorrijtuigenbelasting; 780001084 M 20 09000;83;84</con:value></con:property><con:property><con:name>27</con:name><con:value>VS­012­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780001072 M 20 09000;85;86</con:value></con:property><con:property><con:name>28</con:name><con:value>VS­010­I;Verandering verschuldigdheid motorrijtuigenbelasting; 780001059 M 20 09000;87;88</con:value></con:property><con:property><con:name>29</con:name><con:value>VS­012­E;Verandering verschuldigdheid motorrijtuigenbelasting; 780001102 M 20 09000;89;90</con:value></con:property><con:property><con:name>30</con:name><con:value>VS­012­D;Verandering verschuldigdheid motorrijtuigenbelasting; 780001096 M 20 09000;91;92</con:value></con:property><con:property><con:name>31</con:name><con:value>VS­010­B;Verandering verschuldigdheid motorrijtuigenbelasting; 780000924 M 20 09000;93;94</con:value></con:property><con:property><con:name>32</con:name><con:value>VS­010­B;Verschuldigdheid motorrijtuigenbelasting; 780000936 M 20 09000;95;98</con:value></con:property></con:properties></con:config></con:testStep><con:properties/></con:testCase><con:properties><con:property><con:name>ControleBestand</con:name><con:value>C:\SOAP\Output\20211206 - Output.MRB001.N0079616.PDF</con:value></con:property><con:property><con:name>NieuweBestand</con:name><con:value>C:\SOAP\Output\20211208 - Output.MRB001.N0079972.PDF</con:value></con:property><con:property><con:name>OutputLocatie</con:name><con:value>C:\TestAutomation\Output</con:value></con:property><con:property><con:name>LaatsteRunLocatie</con:name><con:value>C:\TestAutomation\Output\20211215_03.44.20</con:value></con:property><con:property><con:name>outputDir</con:name><con:value>C:\TestAutomation\Output\testtest6</con:value></con:property><con:property><con:name>controlFile</con:name><con:value>C:\SOAP\Output\20211206 - Output.MRB001.N0079616.PDF</con:value></con:property><con:property><con:name>controlDir</con:name><con:value>C:\TestAutomation\Output\testtest6</con:value></con:property><con:property><con:name>runFile</con:name><con:value>C:\SOAP\Output\20211208 - Output.MRB001.N0079972.PDF</con:value></con:property></con:properties></con:testSuite><con:properties/><con:wssContainer/><con:oAuth2ProfileContainer/><con:oAuth1ProfileContainer/><con:sensitiveInformation/></con:soapui-project>
